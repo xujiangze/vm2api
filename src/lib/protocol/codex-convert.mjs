@@ -284,6 +284,13 @@ function stripUnsupportedCodexFields(body = {}) {
   delete next.max_tokens
   delete next.temperature
   delete next.prompt_cache_retention
+  // `stream_options.include_usage` is Chat Completions-only; Responses stream_options
+  // only supports include_obfuscation, and upstream response.create rejects unknown params.
+  if (next.stream_options && typeof next.stream_options === 'object') {
+    const { include_usage: _drop, ...rest } = next.stream_options
+    if (Object.keys(rest).length) next.stream_options = rest
+    else delete next.stream_options
+  }
   const effort = normalizeCodexReasoningEffort(next.reasoning?.effort || next.reasoning_effort)
   delete next.reasoning_effort
   if (effort) {

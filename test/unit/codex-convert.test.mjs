@@ -147,6 +147,34 @@ test('legacy fast service tier is sent as priority to Codex', () => {
   assert.equal(converted.body.service_tier, 'priority')
 })
 
+test('chat-completions stream_options.include_usage is stripped from responses payloads', () => {
+  const original = {
+    model: 'gpt-5.5',
+    input: 'hello',
+    stream: true,
+    stream_options: { include_usage: true },
+  }
+  const converted = toCodexResponses('openai.responses', original)
+  assert.equal(converted.body.stream_options, undefined)
+  assert.equal(original.stream_options.include_usage, true)
+
+  const falsy = toCodexResponses('openai.responses', {
+    model: 'gpt-5.5',
+    input: 'hello',
+    stream: true,
+    stream_options: { include_usage: false },
+  })
+  assert.equal(falsy.body.stream_options, undefined)
+
+  const obfuscation = toCodexResponses('openai.responses', {
+    model: 'gpt-5.5',
+    input: 'hello',
+    stream: true,
+    stream_options: { include_usage: true, include_obfuscation: true },
+  })
+  assert.deepEqual(obfuscation.body.stream_options, { include_obfuscation: true })
+})
+
 test('chat and completions conversion preserve service_tier', () => {
   const chat = toCodexResponses('openai.chat', {
     model: 'gpt-6-luna',
