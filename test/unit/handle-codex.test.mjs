@@ -10,6 +10,7 @@ import {
   pickCodexCandidates,
   codexFailureHold,
   codexFailoverBudget,
+  responseCompletedFromSseLine,
 } from '../../src/lib/protocol/handle-codex.mjs'
 import { persistCodexUsage, getVm } from '../../src/lib/vm/vm-registry.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
@@ -1193,20 +1194,30 @@ test('codex rebuild outbound session is not the inbound session', async () => {
   const sticky = new StickyRouter({ dataDir: path.join(root, 'data'), config: { sticky: { enabled: true } } })
   writeGptVm(root, 'vm-gpt-a')
   const inbound = '11111111-1111-4111-8111-111111111111'
-  const { envelopes } = await hopCodex({
-    root,
-    stickyRouter: sticky,
-    headers: { 'x-session-id': inbound },
-    body: {
-      model: 'gpt-5.4',
-      input: 'hi',
-      stream: false,
-      prompt_cache_key: inbound,
-      conversation_id: inbound,
-      session_id: inbound,
-      previous_response_id: 'resp_keep',
-    },
-  })
+  // Legacy passthrough mode: with local expansion enabled the unknown id would
+  // 400 before any hop, and a known one would be expanded away instead.
+  const previousExpansion = process.env.KIN_CODEX_PREVIOUS_RESPONSE_EXPANSION
+  process.env.KIN_CODEX_PREVIOUS_RESPONSE_EXPANSION = '0'
+  let envelopes
+  try {
+    ;({ envelopes } = await hopCodex({
+      root,
+      stickyRouter: sticky,
+      headers: { 'x-session-id': inbound },
+      body: {
+        model: 'gpt-5.4',
+        input: 'hi',
+        stream: false,
+        prompt_cache_key: inbound,
+        conversation_id: inbound,
+        session_id: inbound,
+        previous_response_id: 'resp_keep',
+      },
+    }))
+  } finally {
+    if (previousExpansion === undefined) delete process.env.KIN_CODEX_PREVIOUS_RESPONSE_EXPANSION
+    else process.env.KIN_CODEX_PREVIOUS_RESPONSE_EXPANSION = previousExpansion
+  }
   const session = envelopes[0].session
   assert.notEqual(session.session_id, inbound)
   assert.match(session.session_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
@@ -1595,4 +1606,184 @@ test('a woken GPT waiter whose seat was taken re-parks first instead of waking t
   assert.deepEqual(order, [0, 1, 2, 3, 4])
   rt.resetOpenAIAccountRuntime()
   fs.rmSync(root, { recursive: true, force: true })
+})
+
+function replayResMock() {
+  return {
+    headersSent: false,
+    statusCode: 0,
+    body: null,
+    ended: false,
+    write() {
+      this.headersSent = true
+    },
+    end() {
+      this.ended = true
+    },
+  }
+}
+
+function replayJsonMock(res) {
+  return (_res, status, body) => {
+    res.statusCode = status
+    res.body = body
+    return body
+  }
+}
+
+const completedLine = (id, text) =>
+  `data: ${JSON.stringify({
+    type: 'response.completed',
+    response: {
+      id,
+      status: 'completed',
+      usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] }],
+    },
+  })}\n`
+
+test('responseCompletedFromSseLine extracts the terminal snapshot only from response.completed', () => {
+  const snapshot = responseCompletedFromSseLine(completedLine('resp_x', 'ok'))
+  assert.equal(snapshot.id, 'resp_x')
+  assert.equal(snapshot.output.length, 1)
+  assert.equal(responseCompletedFromSseLine('data: {"type":"response.created","response":{"id":"resp_x"}}\n'), null)
+  assert.equal(responseCompletedFromSseLine('data: not-json\n'), null)
+  assert.equal(responseCompletedFromSseLine('data: {"type":"response.completed","response":{"output":[]}}\n'), null)
+})
+
+test('HTTP previous_response_id expands locally and never reaches the hop', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-replay-'))
+  writeGptVm(root, 'vm-gpt-a')
+  const hopBodies = []
+  const hop = async ({ body, onEvent }) => {
+    hopBodies.push(body)
+    await onEvent(completedLine(hopBodies.length === 1 ? 'resp_http_1' : 'resp_http_2', 'answer'))
+    return { ok: true, status: 200, terminalState: 'verified', body: { id: 'resp_http_1' } }
+  }
+  const base = {
+    req: { headers: {}, apiKeyKind: 'user' },
+    protocol: 'openai.responses',
+    inbound: { stream: true },
+    stats: { errors: 0, requests: 0, by_route: {} },
+    writeSSEHeaders() {},
+    routing: {},
+    projectRoot: root,
+    ops: {
+      writeCodexKernelConfig() {},
+      ensureCodexKernel: async () => ({ ok: true }),
+      streamCodexKernel: hop,
+    },
+  }
+  try {
+    const res1 = replayResMock()
+    const logBag1 = {}
+    await handleCodexProtocol({
+      ...base,
+      res: res1,
+      logBag: logBag1,
+      json: replayJsonMock(res1),
+      ctx: { body: { model: 'gpt-5.4', input: 'first', stream: true } },
+    })
+    assert.equal(res1.statusCode, 0) // streamed, no json() call
+    assert.equal(logBag1.replay_captured, true)
+    assert.ok(!('previous_response_id' in hopBodies[0]))
+
+    const res2 = replayResMock()
+    const logBag2 = {}
+    await handleCodexProtocol({
+      ...base,
+      res: res2,
+      logBag: logBag2,
+      json: replayJsonMock(res2),
+      ctx: {
+        body: {
+          model: 'gpt-5.4',
+          stream: true,
+          previous_response_id: 'resp_http_1',
+          input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'second' }] }],
+        },
+      },
+    })
+    assert.equal(logBag2.replay_expanded, true)
+    assert.ok(!('previous_response_id' in hopBodies[1]))
+    assert.deepEqual(hopBodies[1].input, [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'first' }] },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'second' }] },
+    ])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('unknown HTTP previous_response_id is rejected before any hop', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-replay-404-'))
+  writeGptVm(root, 'vm-gpt-a')
+  let hopCalls = 0
+  const res = replayResMock()
+  const logBag = {}
+  await handleCodexProtocol({
+    req: { headers: {}, apiKeyKind: 'user' },
+    res,
+    protocol: 'openai.responses',
+    ctx: { body: { model: 'gpt-5.4', stream: true, previous_response_id: 'resp_never_seen', input: 'hi' } },
+    inbound: { stream: true },
+    logBag,
+    stats: { errors: 0, requests: 0, by_route: {} },
+    json: replayJsonMock(res),
+    writeSSEHeaders() {},
+    routing: {},
+    projectRoot: root,
+    ops: {
+      writeCodexKernelConfig() {},
+      ensureCodexKernel: async () => ({ ok: true }),
+      streamCodexKernel: async () => {
+        hopCalls += 1
+        return { ok: true, status: 200, terminalState: 'verified', body: {} }
+      },
+    },
+  })
+  assert.equal(hopCalls, 0)
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'previous_response_not_found')
+  assert.equal(logBag.error_code, 'previous_response_not_found')
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('KIN_CODEX_PREVIOUS_RESPONSE_EXPANSION=0 restores the passthrough behavior', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-replay-off-'))
+  writeGptVm(root, 'vm-gpt-a')
+  const hopBodies = []
+  const res = replayResMock()
+  const previous = process.env.KIN_CODEX_PREVIOUS_RESPONSE_EXPANSION
+  try {
+    process.env.KIN_CODEX_PREVIOUS_RESPONSE_EXPANSION = '0'
+    await handleCodexProtocol({
+      req: { headers: {}, apiKeyKind: 'user' },
+      res,
+      protocol: 'openai.responses',
+      ctx: { body: { model: 'gpt-5.4', stream: true, previous_response_id: 'resp_passthrough', input: 'hi' } },
+      inbound: { stream: true },
+      logBag: {},
+      stats: { errors: 0, requests: 0, by_route: {} },
+      json: replayJsonMock(res),
+      writeSSEHeaders() {},
+      routing: {},
+      projectRoot: root,
+      ops: {
+        writeCodexKernelConfig() {},
+        ensureCodexKernel: async () => ({ ok: true }),
+        streamCodexKernel: async ({ body }) => {
+          hopBodies.push(body)
+          return { ok: true, status: 200, terminalState: 'verified', body: {} }
+        },
+      },
+    })
+    assert.equal(hopBodies.length, 1)
+    assert.equal(hopBodies[0].previous_response_id, 'resp_passthrough')
+  } finally {
+    if (previous === undefined) delete process.env.KIN_CODEX_PREVIOUS_RESPONSE_EXPANSION
+    else process.env.KIN_CODEX_PREVIOUS_RESPONSE_EXPANSION = previous
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

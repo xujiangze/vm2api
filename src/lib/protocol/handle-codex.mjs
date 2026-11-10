@@ -28,6 +28,8 @@ import {
   CODEX_DEFAULT_PARK_MS,
 } from './codex-usage.mjs'
 import { disjointOpenaiUsage, mergeUsage, preferUsage } from './openai-usage.mjs'
+import { expandPreviousResponse } from './responses-ws.mjs'
+import { expansionEnabled, httpReplayStore, replayScopeFromRequest } from './http-replay.mjs'
 import { streamCodexKernel } from '../transport/codex-kernel-client.mjs'
 import { ensureRedaction, maskJson, restoreJsonValue } from '../redaction/runtime.mjs'
 import {
@@ -387,6 +389,20 @@ export function imageGenUsageFromSseLine(line) {
   }
 }
 
+/** Terminal `response.completed` snapshot (id + output items) from one SSE data line. */
+export function responseCompletedFromSseLine(line) {
+  if (typeof line !== 'string' || !line.startsWith('data:') || !line.includes('response.completed')) return null
+  try {
+    const ev = JSON.parse(line.slice(5).trim())
+    if (ev?.type !== 'response.completed') return null
+    const id = typeof ev.response?.id === 'string' ? ev.response.id.trim() : ''
+    if (!id || !Array.isArray(ev.response?.output)) return null
+    return { id, output: ev.response.output }
+  } catch {
+    return null
+  }
+}
+
 /** A known image model the GPT policy disabled is refused before any slot is picked. */
 function disabledImageTool(body, logBag) {
   for (const tool of imageGenerationTools(body)) {
@@ -611,6 +627,32 @@ export async function handleCodexProtocol({
       },
     })
   }
+  // Local expansion: a `previous_response_id` is resolved against this process's
+  // replay store and never forwarded upstream, so no GPT account has to keep
+  // the conversation and pool scheduling stays free to place every turn.
+  const replayScope = replayScopeFromRequest(req)
+  if (protocol === 'openai.responses' && expansionEnabled()) {
+    const previousId =
+      typeof converted.body?.previous_response_id === 'string' ? converted.body.previous_response_id.trim() : ''
+    if (previousId) {
+      const snapshot = httpReplayStore.resolve(replayScope, previousId)
+      if (!snapshot) {
+        stats.errors++
+        logBag.via = 'codex-kernel'
+        logBag.error_code = 'previous_response_not_found'
+        return json(res, 400, {
+          error: {
+            type: 'invalid_request_error',
+            code: 'previous_response_not_found',
+            message:
+              'previous_response_id is not known to this gateway (expired, evicted, restarted, or issued to another API key); resend the full input history without it',
+          },
+        })
+      }
+      converted.body = expandPreviousResponse(converted.body, snapshot)
+      logBag.replay_expanded = true
+    }
+  }
   applyOpenaiWashLog(logBag, {
     inboundPath: ctx.path,
     inboundProtocol: protocol,
@@ -775,6 +817,7 @@ export async function handleCodexProtocol({
         logBag.vm_id = vm.id
         logBag.attempt_count = hops
         const chunks = []
+        let pendingReplaySnapshot = null
         const nameSseEvent = createResponsesSseEventNamer()
         let responseServiceTier = null
         let streamedUsage = null
@@ -840,6 +883,9 @@ export async function handleCodexProtocol({
               if (seen) streamedUsage = mergeUsage(streamedUsage, seen)
               const imageGen = imageGenUsageFromSseLine(line)
               if (imageGen) streamedImageUsage = imageGen
+              const completed =
+                protocol === 'openai.responses' && expansionEnabled() ? responseCompletedFromSseLine(line) : null
+              if (completed) pendingReplaySnapshot = completed
               if (!stream) {
                 chunks.push(line)
                 return
@@ -920,6 +966,18 @@ export async function handleCodexProtocol({
         if (delivered) {
           attemptKind = 'succeeded'
           bindSticky(outboundSessionId)
+          // Streamed or assembled success: remember the terminal snapshot so the
+          // next turn's previous_response_id can expand locally. The completed
+          // event carries the full output; best effort only.
+          if (pendingReplaySnapshot && converted.body?.generate !== false) {
+            try {
+              httpReplayStore.remember(replayScope, pendingReplaySnapshot.id, {
+                input: outboundBody.input,
+                output: pendingReplaySnapshot.output,
+              })
+              logBag.replay_captured = true
+            } catch {}
+          }
           // Billing follows the tier actually sent (codex-proxy-rs contract). The upstream
           // echo is kept apart: `priority` answered with `default` is a Fast downgrade (#777).
           const serviceTier = normalizeServiceTier(outboundBody.service_tier)

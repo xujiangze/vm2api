@@ -168,7 +168,7 @@ curl -sS http://127.0.0.1:8787/v1/chat/completions \
 
 `POST /v1/completions`：`prompt`（字符串或非空数组）必填，转成单条 user Messages。
 
-`POST /v1/responses`：`input` 或 `messages` 必填。回包 `usage.input_tokens_details` 带缓存明细。`stop_reason=refusal` 同样映射 content_filter。
+`POST /v1/responses`：`input` 或 `messages` 必填。回包 `usage.input_tokens_details` 带缓存明细。`stop_reason=refusal` 同样映射 content_filter。带 `previous_response_id` 的续接请求在网关本地展开为全量输入（详见「错误」一节的进程级回放缓存说明），不会把该字段转发给任何 GPT 账号。
 
 Codex HTTP 入口省略 `stream` 时，只有 `Accept` 对 `text/event-stream` 的偏好高于 `application/json`（按 q 值，同值算 JSON）才返回 SSE，否则返回 JSON；显式 `stream` 优先于 Accept。内部 kernel 仍使用 SSE，网关聚合后按入口返回 Responses 或 Chat/Completions JSON。入站 WebSocket 的事件格式不变。
 
@@ -396,7 +396,9 @@ curl -sS http://127.0.0.1:8787/health
 | 没有任何合格账号（未配置、额度 / 凭证 / 模型 / 人工关闭都不合格，且没有上游冷却） | 503 | `pool_unavailable` | 号池当前没有可用账号 |
 | 已经执行过、最后一跳失败 | 上游本义 | 上游错误码（如 `incomplete_response`、429、401） | 上游本义 |
 
-`pool_overloaded` 是 HTTP 529、`type: overloaded_error`，总带 `retry-after`（秒，至少 1）：优先取相关 VM 最早的席位宽限到期，其次已知恢复时刻（冷却、RPM 窗口），都没有时为 1。排队已满时立即返回，不入队。OpenAI 槽仍是自己的 429 `pool_overloaded`。续接 `previous_response_id` 的 Responses 请求只能在原 GPT 账号上继续；该账号已不可用时返回 `409 response_not_portable`，请带完整上下文重新发起。
+`pool_overloaded` 是 HTTP 529、`type: overloaded_error`，总带 `retry-after`（秒，至少 1）：优先取相关 VM 最早的席位宽限到期，其次已知恢复时刻（冷却、RPM 窗口），都没有时为 1。排队已满时立即返回，不入队。OpenAI 槽仍是自己的 429 `pool_overloaded`。
+
+HTTP `/v1/responses` 的 `previous_response_id` 在网关本地展开：每个返回给客户端的已完成响应都会记入进程级回放缓存（快照 = 出站 input + 完整 output），续接请求还原为全量输入后发上游，该字段不会到达任何 GPT 账号——对话不锁定在单一账号上，池内任意调度均可续接。缓存按 API key 隔离，默认 256 条 / 64 MiB（`KIN_CODEX_REPLAY_MAX_ITEMS` / `KIN_CODEX_REPLAY_MAX_BYTES` 可调），超限 LRU 淘汰；进程重启后快照失效。未知、已淘汰、重启丢失或跨 key 的 ID 返回 `400 previous_response_not_found`，请携带完整上下文重发。设 `KIN_CODEX_PREVIOUS_RESPONSE_EXPANSION=0` 可回到旧的账号钉定续接（该模式下原账号不可用时返回 `409 response_not_portable`）。
 
 客户端断开不计 SLA、不处罚账号。
 
