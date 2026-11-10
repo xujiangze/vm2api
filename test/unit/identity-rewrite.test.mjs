@@ -163,6 +163,23 @@ test('extractCallerSession prefers metadata, then sticky headers, then body keys
   )
 })
 
+test('extractCallerSession recognizes underscore session headers from Codex-family clients', () => {
+  assert.equal(
+    extractCallerSession({
+      inbound: { model: 'x' },
+      headers: { session_id: 'codex-session' },
+    }),
+    'codex-session',
+  )
+  assert.equal(
+    extractCallerSession({
+      inbound: { model: 'x' },
+      headers: { conversation_id: 'codex-conversation' },
+    }),
+    'codex-conversation',
+  )
+})
+
 test('resolveInboundIdentity accepts JSON string metadata.user_id', () => {
   const identity = resolveInboundIdentity({
     inbound: {

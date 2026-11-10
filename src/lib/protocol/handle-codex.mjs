@@ -123,7 +123,9 @@ function sessionFrom(req, body) {
     session_id:
       headers['x-session-id'] ||
       headers['session-id'] ||
+      headers['session_id'] ||
       headers['x-conversation-id'] ||
+      headers['conversation_id'] ||
       body?.conversation_id ||
       body?.session_id ||
       null,

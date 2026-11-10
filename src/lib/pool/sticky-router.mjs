@@ -19,6 +19,8 @@ export const DEFAULT_STICKY_HEADER_KEYS = [
   'x-conversation-id',
   'x-claude-code-session-id',
   'session-id',
+  'session_id',
+  'conversation_id',
   'thread-id',
 ]
 

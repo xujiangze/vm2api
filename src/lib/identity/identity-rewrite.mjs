@@ -38,6 +38,9 @@ export const CALLER_SESSION_HEADER_KEYS = Object.freeze([
   'x-conversation-id',
   'x-claude-code-session-id',
   'session-id',
+  // Codex-family clients (and relays like sub2api) send underscore forms.
+  'session_id',
+  'conversation_id',
   'thread-id',
 ])
 
