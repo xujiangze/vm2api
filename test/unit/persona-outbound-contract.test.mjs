@@ -159,6 +159,79 @@ const history = () =>
   }))
 const messageMarkers = (body) => listCacheMarkers(body).filter((marker) => marker.section === 'messages')
 
+test('unofficial cli-hop outbound ends on a user turn when input ends on assistant', async (t) => {
+  const out = await outbound(t, {
+    preset: 'zero',
+    input: {
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'run the tool' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Sure, running it.' }] },
+      ],
+    },
+  })
+  assert.equal(out.messages.at(-2).role, 'assistant')
+  assert.equal(out.messages.at(-2).content.at(0).text, 'Sure, running it.')
+  assert.equal(out.messages.at(-1).role, 'user')
+  assert.equal(out.messages.at(-1).content.at(-1).text, 'continue')
+})
+
+test('unofficial cli-hop outbound answers dangling tool_use before the trailing user turn', async (t) => {
+  const out = await outbound(t, {
+    preset: 'zero',
+    input: {
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'run the tool' }] },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', id: 'toolu_fix1', name: 'shell', input: { cmd: 'echo hi' } },
+            { type: 'text', text: 'Sure, running it.' },
+          ],
+        },
+      ],
+    },
+  })
+  assert.equal(out.messages.at(-1).role, 'user')
+  const tail = out.messages.at(-1).content
+  // The synthesized tool-result turn already ends the conversation on user,
+  // so no extra 'continue' text is needed.
+  assert.equal(tail.length, 1)
+  assert.equal(tail.at(0).type, 'tool_result')
+  assert.equal(tail.at(0).tool_use_id, 'toolu_fix1')
+})
+
+test('official Claude Code cli-hop outbound keeps its assistant tail', async (t) => {
+  const out = await outbound(t, {
+    preset: 'zero',
+    headers: { 'user-agent': OFFICIAL_CLAUDE_CLI_UA },
+    input: {
+      system: [{ type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.303; cc_entrypoint=cli;' }],
+      metadata: { user_id: JSON.stringify({ device_id: 'fixture-device', session_id: 'fixture-session' }) },
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'run the tool' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Sure, running it.' }] },
+      ],
+    },
+  })
+  assert.equal(out.messages.at(-1).role, 'assistant')
+  assert.equal(out.messages.at(-1).content.at(-1).text, 'Sure, running it.')
+})
+
+test('unofficial cli-hop outbound keeps a prefill tail on models that still honor it', async (t) => {
+  const out = await outbound(t, {
+    preset: 'zero',
+    input: {
+      model: 'claude-sonnet-4-5',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'Reply in JSON.' }] },
+        { role: 'assistant', content: [{ type: 'text', text: '{"name":' }] },
+      ],
+    },
+  })
+  assert.equal(out.messages.at(-1).role, 'assistant')
+  assert.equal(out.messages.at(-1).content.at(-1).text, '{"name":')
+})
+
 for (const backend of ['cli', 'api']) {
   const run = backend === 'api' ? unixTest : test
   for (const requestedModel of backend === 'cli' ? ['claude-opus-5-5', 'claude-sonnet-5'] : [model]) {
@@ -586,7 +659,15 @@ for (const backend of ['cli', 'api']) {
       assert.equal(listCacheMarkers(out).length, 4)
       assert.equal(messageMarkers(out).length, callerCount)
       for (const block of templates) assert.ok(out.system.some((candidate) => candidate.text === block.text))
-      if (callerCount) assert.deepEqual(out.messages, messages)
+      if (callerCount) {
+        // The unofficial cli-hop conversation guard appends a plain user turn
+        // when caller history ends on an assistant message.
+        const expected = [...messages]
+        if (backend === 'cli' && messages.at(-1).role === 'assistant') {
+          expected.push({ role: 'user', content: [{ type: 'text', text: 'continue' }] })
+        }
+        assert.deepEqual(out.messages, expected)
+      }
     })
   }
 }

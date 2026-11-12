@@ -33,6 +33,7 @@ const PREFILL_PATTERNS = [
   /final (?:assistant )?message/i,
   /messages?:.*(?:end|start).*(?:user|assistant)/i,
   /must (?:end|start) with a user/i,
+  /assistant message prefill/i,
 ]
 
 const TOOL_PAIR_PATTERNS = [/tool_use.*tool_result/i, /tool_result.*(?:required|missing|expected)/i, /tool_use_id/i]
@@ -516,7 +517,9 @@ function classifyUpstreamResultRaw(
         cooldownUntil: null,
       }
     }
-    if (!repaired && PREFILL_PATTERNS.some((pattern) => pattern.test(hay))) {
+    // Prefill stays classifiable after another repair spent the one-shot
+    // budget; failover-runner bounds it to a single prefill repair.
+    if (PREFILL_PATTERNS.some((pattern) => pattern.test(hay))) {
       return {
         scope: 'request',
         action: 'repair-and-retry',

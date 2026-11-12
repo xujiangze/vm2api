@@ -93,6 +93,7 @@ import {
 import { resolveWorkspaceMode, isOfficialClaudeClient } from './workspace-mode.mjs'
 import { officialMessagesBody } from './anthropic-messages.mjs'
 import { prepareOutboundEnvelope, prepareCliHopBody, prepareCliPersonaInput } from './outbound-attempt.mjs'
+import { conversationGuardEnabled, ensureConversationInvariants } from './request-rectifier.mjs'
 import {
   callerCwdDeclaration,
   cragV2KernelActive,
@@ -1803,6 +1804,12 @@ export function createHandleProtocol(deps) {
               routing: routingNow,
               personaPreset: !requestContext && !officialPassthrough ? resolvedPersona : null,
             })
+            // The HTTP hop settles the conversation tail in prepareOutboundEnvelope;
+            // the CLI hop never reaches it. Runs after prepareCliHopBody so cache
+            // and budget projection still see the caller's own trailing message.
+            if (!requestContext && !officialTraffic && conversationGuardEnabled()) {
+              hopBody = ensureConversationInvariants(hopBody)
+            }
             if (!requestContext) {
               hopBody = ensureBillingAttribution(hopBody, {
                 firstUserText,

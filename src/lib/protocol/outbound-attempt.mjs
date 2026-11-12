@@ -15,7 +15,11 @@ import {
 } from './anthropic-policy.mjs'
 import { liftMidConversationSystemMessages, promoteContentToBlocks } from './sanitize.mjs'
 import { applyThinkingDisplay, thinkingDisplayMode } from './thinking.mjs'
-import { ensureOutputConfigSchema } from './request-rectifier.mjs'
+import {
+  conversationGuardEnabled,
+  ensureConversationInvariants,
+  ensureOutputConfigSchema,
+} from './request-rectifier.mjs'
 import {
   applyCrsIdentityReplace,
   extractCallerSession,
@@ -657,8 +661,11 @@ export function prepareOutboundEnvelope({
     String(headers['anthropic-beta'] || '').split(','),
     displayed,
   ).join(',')
-  const body = sealClaudeCodeCch(sanitizeAnthropicBodyForBetaTokens(displayed, headers?.['anthropic-beta'] || ''), {
-    enabled: routing?.compatibility?.cch_enabled !== false,
-  })
+  let body = sanitizeAnthropicBodyForBetaTokens(displayed, headers?.['anthropic-beta'] || '')
+  // The unofficial tail is settled last: beta gating can lift a trailing system turn
+  // back onto an assistant tail, and cache markers must stay on caller turns.
+  // Inference-only credentials skip the rectifier above but still need this check.
+  if (unofficial && !requestContext && conversationGuardEnabled()) body = ensureConversationInvariants(body)
+  body = sealClaudeCodeCch(body, { enabled: routing?.compatibility?.cch_enabled !== false })
   return { body, headers, toolNames: prepared.toolNames }
 }

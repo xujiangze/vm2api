@@ -638,6 +638,91 @@ test('signature error is repaired once on the same account when enabled', async 
   assert.equal(calls, 2)
 })
 
+test('prefill repair still runs after another repair spent the one-shot budget', async () => {
+  const scheduler = new Scheduler([candidate(1)])
+  const runner = new FailoverRunner({ scheduler, config: { signature_repair: true, max_same_account_retries: 2 } })
+  let calls = 0
+  const result = await runner.run({
+    requestId: 'req-prefill-after-signature',
+    canonicalBody: {
+      model: 'claude-opus-test',
+      thinking: { type: 'enabled' },
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'x' },
+            { type: 'text', text: 'keep' },
+          ],
+        },
+      ],
+    },
+    model: 'claude-opus-test',
+    callAttempt: ({ body }) => {
+      calls++
+      if (calls === 1) {
+        return {
+          ok: false,
+          status: 400,
+          terminalState: 'rejected',
+          body: { error: { message: 'thinking.signature: Field required' } },
+        }
+      }
+      if (calls === 2) {
+        return {
+          ok: false,
+          status: 400,
+          terminalState: 'rejected',
+          body: {
+            error: {
+              message:
+                'This model does not support assistant message prefill. The conversation must end with a user message.',
+            },
+          },
+        }
+      }
+      assert.equal(body.messages.at(-1).role, 'user')
+      assert.equal(body.messages.at(-1).content.at(-1).text, 'continue')
+      return success('repaired-twice')
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.attemptCount, 3)
+  assert.equal(calls, 3)
+})
+
+test('prefill repair itself stays bounded to one attempt', async () => {
+  const scheduler = new Scheduler([candidate(1)])
+  const runner = new FailoverRunner({ scheduler })
+  const tails = []
+  const result = await runner.run({
+    requestId: 'req-prefill-only-once',
+    canonicalBody: {
+      model: 'claude-opus-test',
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+      ],
+    },
+    model: 'claude-opus-test',
+    callAttempt: ({ body }) => {
+      // Record instead of asserting here: a throw reads as a transport failure.
+      tails.push(body.messages.at(-1).role)
+      return {
+        ok: false,
+        status: 400,
+        terminalState: 'rejected',
+        body: { error: { message: 'This model does not support assistant message prefill.' } },
+      }
+    },
+  })
+  // The caller's tail, then one repaired retry; the repeated 400 surfaces instead of looping.
+  assert.deepEqual(tails, ['assistant', 'user'])
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 400)
+  assert.equal(result.finalState, 'rejected')
+})
+
 test('search history repair still runs when the rejected hop outlived the deadline', async () => {
   const scheduler = new Scheduler([candidate(1)])
   const runner = new FailoverRunner({ scheduler, config: { total_retry_deadline_ms: 20 } })

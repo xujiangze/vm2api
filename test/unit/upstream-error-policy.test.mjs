@@ -643,6 +643,28 @@ test('assistant prefill 400 is repairable', () => {
   assert.equal(body.messages.at(-1).role, 'user')
 })
 
+test('assistant message prefill 400 variants are repairable', () => {
+  // Full upstream message seen via codex→litellm→sub2api→vm2api.
+  const full = classifyUpstreamResult({
+    status: 400,
+    body: {
+      error: {
+        message:
+          'This model does not support assistant message prefill. The conversation must end with a user message.',
+      },
+    },
+  })
+  assert.equal(full.action, 'repair-and-retry')
+  assert.equal(full.reason, 'prefill_repairable')
+  // First sentence alone must still classify.
+  const firstSentence = classifyUpstreamResult({
+    status: 400,
+    body: { error: { message: 'This model does not support assistant message prefill.' } },
+  })
+  assert.equal(firstSentence.action, 'repair-and-retry')
+  assert.equal(firstSentence.reason, 'prefill_repairable')
+})
+
 test('invalid encrypted_content flattens the replayed search history once', () => {
   const result = {
     status: 400,

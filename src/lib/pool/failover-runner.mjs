@@ -760,10 +760,11 @@ export class FailoverRunner {
     let lastResult = null
     let lastPolicy = null
     let repaired = false
-    let repairPolicy = null
+    let repairPolicies = []
     // The repaired body is the known fix and has not been sent yet; a slow
     // rejected hop (a 400 can take minutes on a long transcript) must not
-    // turn it into the client's error. Bounded: repair is one-shot.
+    // turn it into the client's error. Bounded: repair is one-shot, except a
+    // prefill repair may still run after another repair spent the budget.
     let repairPending = false
     let requestBody = clone(canonicalBody)
     let searchRepair = null
@@ -919,7 +920,7 @@ export class FailoverRunner {
                 // slot. Replay the same repairs on that freshly rendered body.
                 repairs: [
                   ...(knownSearchRepair ? [{ action: 'repair-and-retry', reason: 'search_repairable' }] : []),
-                  ...(repairPolicy ? [repairPolicy] : []),
+                  ...repairPolicies,
                 ],
                 attemptStartedAt: attemptStarted,
                 freshSlot,
@@ -1076,9 +1077,12 @@ export class FailoverRunner {
           releaseStickySlots()
           return { ...result, ...attribution(), finalState: 'verified' }
         }
-        if (policy.action === 'repair-and-retry' && !repaired && !result?.committed) {
+        const prefillBudgetFree =
+          policy.reason === 'prefill_repairable' &&
+          !repairPolicies.some((entry) => entry.reason === 'prefill_repairable')
+        if (policy.action === 'repair-and-retry' && (prefillBudgetFree || !repaired) && !result?.committed) {
           repaired = true
-          repairPolicy = { action: policy.action, reason: policy.reason }
+          repairPolicies.push({ action: policy.action, reason: policy.reason })
           repairPending = true
           if (policy.reason === 'search_repairable' && repairKey && fingerprint()) {
             searchRepair = { key: repairKey }

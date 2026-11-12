@@ -106,6 +106,34 @@ export function ensureConversationEndsWithUser(body = {}) {
   }
 }
 
+/** KIN_UNOFFICIAL_CONVERSATION_GUARD=0 restores the retry-only tail repair. */
+export function conversationGuardEnabled() {
+  return process.env.KIN_UNOFFICIAL_CONVERSATION_GUARD !== '0'
+}
+
+/** Claude before 4.6 continues a trailing assistant turn; newer and unknown ids reject it. */
+const PREFILL_MODEL_RE =
+  /^claude-(?:3[-.]|(?:(?:sonnet|opus)-4(?:-0)?|opus-4[-.]1|(?:sonnet|haiku|opus)-4[-.]5)(?:-\d{8})?$)/
+
+export function modelSupportsAssistantPrefill(modelId = '') {
+  const id = String(modelId || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\[1m\]$/i, '')
+  return PREFILL_MODEL_RE.test(id)
+}
+
+/**
+ * First-hop unofficial tail check. Run it on the final outbound conversation: a later
+ * step that drops or lifts the last turn reopens the tail. A dangling tool_use 400s on
+ * every model, a trailing assistant turn only where prefill is gone. Pair first so a
+ * synthesized tool-result turn can end the conversation on its own.
+ */
+export function ensureConversationInvariants(body = {}) {
+  const paired = pairMissingToolResults(body)
+  return modelSupportsAssistantPrefill(paired.model) ? paired : ensureConversationEndsWithUser(paired)
+}
+
 function fillObjectSchema(node) {
   if (!node || typeof node !== 'object') return node
   if (Array.isArray(node)) return node.map(fillObjectSchema)
