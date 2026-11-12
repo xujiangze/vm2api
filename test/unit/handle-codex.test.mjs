@@ -1750,6 +1750,83 @@ test('unknown HTTP previous_response_id is rejected before any hop', async () =>
   fs.rmSync(root, { recursive: true, force: true })
 })
 
+const toolCallCompletedLine = (id, callId) =>
+  `data: ${JSON.stringify({
+    type: 'response.completed',
+    response: {
+      id,
+      status: 'completed',
+      usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+      output: [{ type: 'function_call', id: 'fc_1', call_id: callId, name: 'Task', arguments: '{}' }],
+    },
+  })}\n`
+
+test('HTTP previous_response_id ending with a tool call needs its output in the continuation', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-replay-tool-'))
+  writeGptVm(root, 'vm-gpt-a')
+  const hopBodies = []
+  const hop = async ({ body, onEvent }) => {
+    hopBodies.push(body)
+    await onEvent(
+      hopBodies.length === 1 ? toolCallCompletedLine('resp_tool_1', 'call_main') : completedLine('resp_tool_2', 'done'),
+    )
+    return { ok: true, status: 200, terminalState: 'verified', body: {} }
+  }
+  const base = {
+    req: { headers: {}, apiKeyKind: 'user' },
+    protocol: 'openai.responses',
+    inbound: { stream: true },
+    stats: { errors: 0, requests: 0, by_route: {} },
+    writeSSEHeaders() {},
+    routing: {},
+    projectRoot: root,
+    ops: {
+      writeCodexKernelConfig() {},
+      ensureCodexKernel: async () => ({ ok: true }),
+      streamCodexKernel: hop,
+    },
+  }
+  const run = async (body) => {
+    const res = replayResMock()
+    const logBag = {}
+    await handleCodexProtocol({ ...base, res, logBag, json: replayJsonMock(res), ctx: { body } })
+    return { res, logBag }
+  }
+  const user = (text) => ({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] })
+  const call = { type: 'function_call', call_id: 'call_main', name: 'Task', arguments: '{}' }
+  const output = { type: 'function_call_output', call_id: 'call_main', output: 'ok' }
+  try {
+    await run({ model: 'gpt-5.4', stream: true, input: 'first' })
+    assert.equal(hopBodies.length, 1)
+
+    const orphan = await run({
+      model: 'gpt-5.4',
+      stream: true,
+      previous_response_id: 'resp_tool_1',
+      input: [user('subagent turn')],
+    })
+    assert.equal(hopBodies.length, 1)
+    assert.equal(orphan.res.statusCode, 400)
+    assert.equal(orphan.res.body.error.code, 'previous_response_not_found')
+    assert.equal(orphan.logBag.replay_unanswered_calls, 1)
+
+    const answered = await run({
+      model: 'gpt-5.4',
+      stream: true,
+      previous_response_id: 'resp_tool_1',
+      input: [call, output],
+    })
+    assert.equal(answered.logBag.replay_expanded, true)
+    assert.equal(hopBodies.length, 2)
+    assert.deepEqual(
+      hopBodies[1].input.map((item) => item.type),
+      ['message', 'function_call', 'function_call_output'],
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('KIN_CODEX_PREVIOUS_RESPONSE_EXPANSION=0 restores the passthrough behavior', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-replay-off-'))
   writeGptVm(root, 'vm-gpt-a')

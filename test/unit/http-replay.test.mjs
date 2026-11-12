@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   createProcessReplay,
   expansionEnabled,
+  pairReplayedToolCalls,
   replayScopeFromRequest,
   DEFAULT_HTTP_REPLAY_MAX_ITEMS,
   DEFAULT_HTTP_REPLAY_MAX_BYTES,
@@ -95,4 +96,35 @@ test('replayScopeFromRequest prefers the API key record id', () => {
 test('default limits match the documented process budget', () => {
   assert.equal(DEFAULT_HTTP_REPLAY_MAX_ITEMS, 256)
   assert.equal(DEFAULT_HTTP_REPLAY_MAX_BYTES, 64 * 1024 * 1024)
+})
+
+const call = (id, type = 'function_call') => ({ type, call_id: id, name: 'Task', arguments: '{}' })
+const output = (id, type = 'function_call_output') => ({ type, call_id: id, output: 'ok' })
+
+test('pairReplayedToolCalls passes through snapshots without trailing tool calls', () => {
+  const input = [item('next')]
+  const paired = pairReplayedToolCalls({ input: [], output: [{ type: 'message', role: 'assistant' }] }, input)
+  assert.deepEqual(paired, { ok: true, input })
+})
+
+test('pairReplayedToolCalls reports replayed calls the continuation does not answer', () => {
+  const paired = pairReplayedToolCalls({ input: [], output: [call('call_a'), call('call_b')] }, [
+    output('call_a'),
+    item('subagent turn'),
+  ])
+  assert.deepEqual(paired, { ok: false, missing: ['call_b'] })
+})
+
+test('pairReplayedToolCalls drops echoed replayed calls and keeps their outputs', () => {
+  const paired = pairReplayedToolCalls({ input: [], output: [call('call_a')] }, [call('call_a'), output('call_a')])
+  assert.deepEqual(paired, { ok: true, input: [output('call_a')] })
+})
+
+test('pairReplayedToolCalls requires the output type matching the call type', () => {
+  const snapshot = { input: [], output: [call('call_p', 'custom_tool_call')] }
+  assert.equal(pairReplayedToolCalls(snapshot, [output('call_p')]).ok, false)
+  assert.deepEqual(pairReplayedToolCalls(snapshot, [output('call_p', 'custom_tool_call_output')]), {
+    ok: true,
+    input: [output('call_p', 'custom_tool_call_output')],
+  })
 })

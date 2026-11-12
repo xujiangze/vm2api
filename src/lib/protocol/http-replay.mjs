@@ -34,6 +34,35 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value))
 }
 
+const TOOL_OUTPUT_TYPES = { function_call: 'function_call_output', custom_tool_call: 'custom_tool_call_output' }
+
+function callIdOf(item) {
+  return item && typeof item === 'object' && typeof item.call_id === 'string' ? item.call_id : ''
+}
+
+/**
+ * Tool calls ending the replayed response must be answered by the continuation
+ * input. sub2api binds response ids per Claude Code session, so subagents and
+ * client retries can carry an id whose trailing call belongs to another turn;
+ * expanding it anyway makes upstream 400 "No tool output found". Unanswered
+ * calls are reported so the caller can answer previous_response_not_found,
+ * which sub2api recovers from by resending the full history. Calls the client
+ * echoed back are dropped from `input` so each call appears once upstream.
+ */
+export function pairReplayedToolCalls(snapshot, input) {
+  const items = Array.isArray(input) ? input : []
+  const replayed = new Map()
+  for (const item of Array.isArray(snapshot?.output) ? snapshot.output : []) {
+    const id = callIdOf(item)
+    if (id && TOOL_OUTPUT_TYPES[item.type]) replayed.set(id, TOOL_OUTPUT_TYPES[item.type])
+  }
+  if (!replayed.size) return { ok: true, input: items }
+  const answered = new Set(items.filter((item) => replayed.get(callIdOf(item)) === item?.type).map(callIdOf))
+  const missing = [...replayed.keys()].filter((id) => !answered.has(id))
+  if (missing.length) return { ok: false, missing }
+  return { ok: true, input: items.filter((item) => !(TOOL_OUTPUT_TYPES[item?.type] && replayed.has(callIdOf(item)))) }
+}
+
 export function createProcessReplay({
   maxItems = envInt('KIN_CODEX_REPLAY_MAX_ITEMS', DEFAULT_HTTP_REPLAY_MAX_ITEMS),
   maxBytes = envInt('KIN_CODEX_REPLAY_MAX_BYTES', DEFAULT_HTTP_REPLAY_MAX_BYTES),

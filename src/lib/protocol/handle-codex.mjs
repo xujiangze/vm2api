@@ -29,7 +29,7 @@ import {
 } from './codex-usage.mjs'
 import { disjointOpenaiUsage, mergeUsage, preferUsage } from './openai-usage.mjs'
 import { expandPreviousResponse } from './responses-ws.mjs'
-import { expansionEnabled, httpReplayStore, replayScopeFromRequest } from './http-replay.mjs'
+import { expansionEnabled, httpReplayStore, pairReplayedToolCalls, replayScopeFromRequest } from './http-replay.mjs'
 import { streamCodexKernel } from '../transport/codex-kernel-client.mjs'
 import { ensureRedaction, maskJson, restoreJsonValue } from '../redaction/runtime.mjs'
 import {
@@ -638,20 +638,23 @@ export async function handleCodexProtocol({
       typeof converted.body?.previous_response_id === 'string' ? converted.body.previous_response_id.trim() : ''
     if (previousId) {
       const snapshot = httpReplayStore.resolve(replayScope, previousId)
-      if (!snapshot) {
+      const paired = snapshot ? pairReplayedToolCalls(snapshot, converted.body.input) : null
+      if (!snapshot || !paired.ok) {
         stats.errors++
         logBag.via = 'codex-kernel'
         logBag.error_code = 'previous_response_not_found'
+        if (paired) logBag.replay_unanswered_calls = paired.missing.length
         return json(res, 400, {
           error: {
             type: 'invalid_request_error',
             code: 'previous_response_not_found',
-            message:
-              'previous_response_id is not known to this gateway (expired, evicted, restarted, or issued to another API key); resend the full input history without it',
+            message: snapshot
+              ? 'previous_response_id ends with tool calls this request does not answer; resend the full input history without it'
+              : 'previous_response_id is not known to this gateway (expired, evicted, restarted, or issued to another API key); resend the full input history without it',
           },
         })
       }
-      converted.body = expandPreviousResponse(converted.body, snapshot)
+      converted.body = expandPreviousResponse({ ...converted.body, input: paired.input }, snapshot)
       logBag.replay_expanded = true
     }
   }
