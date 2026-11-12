@@ -9,7 +9,7 @@ vm2api：VM-fidelity subscription-to-API 网关（Claude / ChatGPT 订阅槽位 
 - **`main`**：上游同步分支，保持纯净，不放私有提交，定期与上游同步。
 - **`xjz`**：**专用二开分支，唯一发布源**。所有私有改动提交到这里，并推送到 `origin/xjz`。会定期 merge `main` 同步上游变更。
 
-任何私有改动必须同时登记到 `docs/二开版本/私有发布日志.md`（含动机、改动文件、与上游同步时的注意点），发布流程见 `docs/二开版本/私有发布规范.md`，线上升级步骤见 `docs/二开版本/升级手册.md`。私有镜像发布在 `ghcr.io/xujiangze/vm2api`，tag 格式 `xjz-{日期}`（如 `xjz-20261112`，不带 `v` 前缀，避免触发上游 release workflow）。
+任何私有改动必须同时登记到 `docs/二开版本/私有发布日志.md`（含动机、改动文件、与上游同步时的注意点），发布流程见 `docs/二开版本/私有发布规范.md`，线上升级步骤见 `docs/二开版本/升级手册.md`。私有镜像发布在 `ghcr.io/xujiangze/vm2api`，tag 格式 `v{上游VERSION}-xjz-{日期}`（如 `v1.4.073-xjz-20261112`；推送前确认仓库 Actions 已禁用，避免触发上游 release workflow）。
 
 ## 开发速览
 
